@@ -1,7 +1,7 @@
 // Persistence. LinkRepository is the port; Postgres and in-memory are adapters.
 import pg from "pg";
 import { DuplicateCodeError } from "./errors.js";
-import type { DailyClicks, Link } from "./models.js";
+import { isoDay, type DailyClicks, type Link } from "./models.js";
 
 export interface LinkRepository {
   insert(
@@ -13,7 +13,7 @@ export interface LinkRepository {
   ): Promise<Link>;
   findByCode(code: string): Promise<Link | null>;
   delete(code: string): Promise<boolean>;
-  recordClick(linkId: number, day: string): Promise<void>;
+  recordClick(linkId: number, at: Date): Promise<void>;
   dailyClicks(linkId: number, start: string, end: string): Promise<DailyClicks[]>;
   ping(): Promise<boolean>;
 }
@@ -22,7 +22,7 @@ export interface LinkRepository {
 pg.types.setTypeParser(20, (v) => Number.parseInt(v, 10));
 pg.types.setTypeParser(1082, (v) => v);
 
-const COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count";
+const COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count, last_accessed_at";
 
 interface LinkRow {
   id: number;
@@ -32,6 +32,7 @@ interface LinkRow {
   created_at: Date;
   expires_at: Date | null;
   click_count: number;
+  last_accessed_at: Date | null;
 }
 
 const toLink = (r: LinkRow): Link => ({
@@ -42,6 +43,7 @@ const toLink = (r: LinkRow): Link => ({
   createdAt: r.created_at,
   expiresAt: r.expires_at,
   clickCount: r.click_count,
+  lastAccessedAt: r.last_accessed_at,
 });
 
 export class PgLinkRepository implements LinkRepository {
@@ -71,16 +73,16 @@ export class PgLinkRepository implements LinkRepository {
     return (result.rowCount ?? 0) > 0;
   }
 
-  async recordClick(linkId: number, day: string) {
-    // One statement = one atomic unit: bump the total and upsert the daily bucket.
+  async recordClick(linkId: number, at: Date) {
+    // One statement = one atomic unit: bump the total, remember when, upsert the daily bucket.
     await this.pool.query(
       `WITH bumped AS (
-         UPDATE links SET click_count = click_count + 1 WHERE id = $1 RETURNING id
+         UPDATE links SET click_count = click_count + 1, last_accessed_at = $3 WHERE id = $1 RETURNING id
        )
        INSERT INTO click_daily (link_id, day, clicks)
        SELECT id, $2::date, 1 FROM bumped
        ON CONFLICT (link_id, day) DO UPDATE SET clicks = click_daily.clicks + 1`,
-      [linkId, day],
+      [linkId, isoDay(at), at],
     );
   }
 
@@ -110,7 +112,16 @@ export class InMemoryLinkRepository implements LinkRepository {
 
   async insert(code: string, longUrl: string, custom: boolean, createdAt: Date, expiresAt: Date | null) {
     if (this.links.has(code)) throw new DuplicateCodeError(code);
-    const link: Link = { id: this.nextId++, code, longUrl, custom, createdAt, expiresAt, clickCount: 0 };
+    const link: Link = {
+      id: this.nextId++,
+      code,
+      longUrl,
+      custom,
+      createdAt,
+      expiresAt,
+      clickCount: 0,
+      lastAccessedAt: null,
+    };
     this.links.set(code, link);
     return { ...link };
   }
@@ -128,11 +139,12 @@ export class InMemoryLinkRepository implements LinkRepository {
     return true;
   }
 
-  async recordClick(linkId: number, day: string) {
+  async recordClick(linkId: number, at: Date) {
     for (const link of this.links.values()) {
       if (link.id === linkId) {
         link.clickCount += 1;
-        const key = `${linkId}|${day}`;
+        link.lastAccessedAt = at;
+        const key = `${linkId}|${isoDay(at)}`;
         this.clicks.set(key, (this.clicks.get(key) ?? 0) + 1);
         return;
       }

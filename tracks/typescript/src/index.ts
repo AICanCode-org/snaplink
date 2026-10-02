@@ -12,7 +12,11 @@ const pool = createPool(settings.databaseUrl);
 const applied = await runMigrations(pool, settings.migrationsDir);
 console.log(`migrations applied this start: ${applied.length ? applied.join(",") : "none"}`);
 
-const cache: LinkCache = settings.redisUrl ? new RedisLinkCache(settings.redisUrl) : new NoopCache();
+// Cache warnings go through Fastify's JSON logger like every other line (`app` exists before Redis can fail).
+const cacheLog = { warn: (msg: string) => app.log.warn(msg) };
+const cache: LinkCache = settings.redisUrl
+  ? new RedisLinkCache(settings.redisUrl, cacheLog)
+  : new NoopCache();
 const service = new LinkService(new PgLinkRepository(pool), cache);
 const llm =
   settings.insightsProvider === "llm"

@@ -63,13 +63,14 @@ describe("SnapLink with real Postgres + Redis", () => {
 
   it("records applied migrations", async () => {
     const { rows } = await pool.query("SELECT version FROM schema_migrations ORDER BY version");
-    expect(rows[0].version).toBe(1);
+    expect(rows.slice(0, 2).map((r) => r.version)).toEqual([1, 2]);
   });
 
   it("persists clicks across the full flow", async () => {
     const code = (await create({ url: "https://www.aicancode.org" })).json().code;
     for (let i = 0; i < 3; i++) expect((await app.inject(`/${code}`)).statusCode).toBe(302);
     expect((await app.inject(`/api/v1/links/${code}`)).json().clickCount).toBe(3);
+    expect((await app.inject(`/api/v1/links/${code}`)).json().lastAccessedAt).not.toBeNull(); // V2 column
     const stats = (await app.inject(`/api/v1/links/${code}/stats`)).json();
     expect(stats.totalClicks).toBe(3);
     expect(stats.daily[6].clicks).toBe(3);

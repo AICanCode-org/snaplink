@@ -1,8 +1,9 @@
 // HTTP layer (Fastify). Thin: parse input, call the service, map errors to problem+json.
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import Fastify, { LogController, type FastifyInstance, type FastifyServerOptions } from "fastify";
 import { ApiError, validationError } from "./errors.js";
 import { WINDOW_DAYS, type InsightService } from "./insights.js";
 import type { Link } from "./models.js";
+import { incomingOrNewId, REQUEST_ID_HEADER } from "./observability.js";
 import type { LinkService } from "./service.js";
 
 const PROBLEM_JSON = "application/problem+json";
@@ -17,7 +18,16 @@ export interface AppDeps {
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 
 export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): FastifyInstance {
-  const app = Fastify(opts);
+  const app = Fastify({
+    // Request IDs (Phase 7): one ID per request, echoed back and attached to every log line.
+    requestIdHeader: false,
+    genReqId: (req) => incomingOrNewId(req.headers[REQUEST_ID_HEADER]),
+    logController: new LogController({ requestIdLogLabel: "requestId" }),
+    ...opts,
+  });
+  app.addHook("onSend", async (request, reply) => {
+    reply.header(REQUEST_ID_HEADER, request.id);
+  });
   const { service, insights, publicBaseUrl } = deps;
 
   const toJson = (link: Link) => ({
@@ -28,6 +38,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     createdAt: iso(link.createdAt),
     expiresAt: iso(link.expiresAt),
     clickCount: link.clickCount,
+    lastAccessedAt: iso(link.lastAccessedAt),
   });
 
   // ---- error mapping ---------------------------------------------------
@@ -54,6 +65,10 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
       checks: { database: dbUp ? "UP" : "DOWN", cache },
     });
   });
+
+  app.get("/metrics", async (_req, reply) =>
+    reply.type("text/plain; version=0.0.4").send(service.metrics.render()),
+  );
 
   app.post("/api/v1/links", async (req, reply) => {
     const body = req.body;
@@ -91,6 +106,7 @@ export function buildApp(deps: AppDeps, opts: FastifyServerOptions = {}): Fastif
     const link = await service.get(req.params.code);
     const daily = await service.dailySeries(link, WINDOW_DAYS);
     const result = await insights.summarise({ code: link.code, allTimeClicks: link.clickCount, daily });
+    if (result.fallback) service.metrics.inc("snaplink_insights_fallback_total");
     return { code: link.code, ...result, generatedAt: iso(service.clock()) };
   });
 

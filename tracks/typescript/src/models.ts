@@ -6,6 +6,8 @@ export interface Link {
   createdAt: Date;
   expiresAt: Date | null;
   clickCount: number;
+  /** Added in v1.1.0 (V2 migration). */
+  lastAccessedAt: Date | null;
 }
 
 /** The minimum the redirect path needs. Stored in Redis as JSON. */

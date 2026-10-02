@@ -3,6 +3,7 @@ import { generateCode } from "./codes.js";
 import type { LinkCache } from "./cache.js";
 import { aliasTaken, DuplicateCodeError, expired, notFound } from "./errors.js";
 import { isExpired, isoDay, type CachedLink, type DailyClicks, type Link } from "./models.js";
+import { Metrics } from "./metrics.js";
 import type { LinkRepository } from "./repository.js";
 import { validateAlias, validateDays, validateExpiresInDays, validateUrl } from "./validation.js";
 
@@ -20,6 +21,7 @@ export class LinkService {
     readonly clock: Clock = () => new Date(),
     private readonly codeGenerator: () => string = generateCode,
     private readonly log: Logger = console,
+    readonly metrics: Metrics = new Metrics(),
   ) {}
 
   // ---- create ---------------------------------------------------------
@@ -31,22 +33,29 @@ export class LinkService {
     const expiresAt = days ? new Date(now.getTime() + days * DAY_MS) : null;
 
     if (customAlias) {
+      let link: Link;
       try {
-        return await this.repo.insert(customAlias, longUrl, true, now, expiresAt);
+        link = await this.repo.insert(customAlias, longUrl, true, now, expiresAt);
       } catch (err) {
         if (err instanceof DuplicateCodeError) throw aliasTaken(customAlias);
         throw err;
       }
+      this.metrics.inc("snaplink_links_created_total");
+      return link;
     }
     // Random codes can collide (birthday problem); the DB unique constraint is the
     // source of truth, so we retry a few times instead of "check then insert".
     for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+      let link: Link;
       try {
-        return await this.repo.insert(this.codeGenerator(), longUrl, false, now, expiresAt);
+        link = await this.repo.insert(this.codeGenerator(), longUrl, false, now, expiresAt);
       } catch (err) {
         if (!(err instanceof DuplicateCodeError)) throw err;
         this.log.warn("short code collision, retrying");
+        continue;
       }
+      this.metrics.inc("snaplink_links_created_total");
+      return link;
     }
     throw new Error("could not generate a unique short code");
   }
@@ -67,6 +76,7 @@ export class LinkService {
   async resolve(code: string): Promise<string> {
     const now = this.clock();
     let cached = await this.cache.get(code);
+    this.metrics.inc(cached ? "snaplink_cache_hits_total" : "snaplink_cache_misses_total");
     if (!cached) {
       const link = await this.repo.findByCode(code);
       if (!link) throw notFound(code);
@@ -79,11 +89,12 @@ export class LinkService {
       throw expired(code);
     }
     try {
-      await this.repo.recordClick(cached.id, isoDay(now));
+      await this.repo.recordClick(cached.id, now);
     } catch (err) {
       // A lost click must never break a redirect.
       this.log.error(`failed to record click for ${code}: ${(err as Error).message}`);
     }
+    this.metrics.inc("snaplink_redirects_total");
     return cached.longUrl;
   }
 
