@@ -8,11 +8,6 @@ import pytest
 # watch the tests fail (red), implement until they pass (green). See docs/phase-3.
 # ---------------------------------------------------------------------------
 PENDING: dict[str, str] = {
-    "test_codes.py": "Phase 3 M1 - short codes",
-    "test_validation.py": "Phase 3 M1 - validation",
-    "test_service.py": "Phase 3 M2-M4 - LinkService",
-    "test_api.py": "Phase 3 M2-M4 - HTTP API",
-    "test_insights.py": "Phase 3 M5 - insights",
     "test_api_integration.py": "Phase 4 - integration tests",
 }
 

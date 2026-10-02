@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -25,13 +26,33 @@ class InsightGenerator(Protocol):
     def generate(self, data: InsightInput) -> str: ...
 
 
+def _clicks(n: int) -> str:
+    return f"{n} click" if n == 1 else f"{n} clicks"
+
+
 class TemplateInsightGenerator:
-    """Deterministic, offline, free. Identical wording in all three tracks (see spec/requirements.md FR-9)."""
+    """Deterministic, offline, free. Identical wording in all three tracks."""
 
     def generate(self, data: InsightInput) -> str:
-        # TODO(phase-3 M5): build the exact sentence from the spec: total clicks in the window,
-        # busiest day (earliest wins ties), trend = last half vs first half of the window.
-        raise NotImplementedError("TODO(phase-3 M5): TemplateInsightGenerator.generate")
+        total = sum(d.clicks for d in data.daily)
+        if total == 0:
+            return (
+                f"/{data.code} had no clicks in the last {WINDOW_DAYS} days "
+                f"(all-time: {data.all_time_clicks}). Share it where your audience hangs out!"
+            )
+        busiest = data.daily[0]
+        for day in data.daily[1:]:
+            if day.clicks > busiest.clicks:  # strict '>' so the earliest day wins ties
+                busiest = day
+        half = len(data.daily) // 2
+        previous = sum(d.clicks for d in data.daily[:half])
+        recent = sum(d.clicks for d in data.daily[len(data.daily) - half :])
+        trend = "up" if recent > previous else "down" if recent < previous else "steady"
+        return (
+            f"/{data.code} got {_clicks(total)} in the last {WINDOW_DAYS} days "
+            f"(all-time: {data.all_time_clicks}). Busiest day: {busiest.day.isoformat()} "
+            f"with {_clicks(busiest.clicks)}. Trend: {trend} compared with earlier in the week."
+        )
 
 
 SYSTEM_PROMPT = (
@@ -56,10 +77,28 @@ class LlmInsightGenerator:
         self._model = model
 
     def generate(self, data: InsightInput) -> str:
-        # TODO(phase-3 M5): POST /chat/completions with SYSTEM_PROMPT + the facts as JSON
-        # (model, temperature 0.2, max_tokens 120). raise_for_status(); return choices[0].message.content
-        # stripped; raise ValueError on an empty answer.
-        raise NotImplementedError("TODO(phase-3 M5): LlmInsightGenerator.generate")
+        facts = {
+            "code": data.code,
+            "allTimeClicks": data.all_time_clicks,
+            "daily": [{"date": d.day.isoformat(), "clicks": d.clicks} for d in data.daily],
+        }
+        response = self._client.post(
+            "/chat/completions",
+            json={
+                "model": self._model,
+                "temperature": 0.2,
+                "max_tokens": 120,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": "Summarise these click stats:\n" + json.dumps(facts)},
+                ],
+            },
+        )
+        response.raise_for_status()
+        text = response.json()["choices"][0]["message"]["content"].strip()
+        if not text:
+            raise ValueError("empty LLM response")
+        return text
 
 
 @dataclass(frozen=True)
@@ -75,6 +114,10 @@ class InsightService:
         self._llm = llm
 
     def summarise(self, data: InsightInput) -> InsightResult:
-        # TODO(phase-3 M5): no LLM -> InsightResult("template", False, ...). With an LLM: try it and return
-        # ("llm", False, ...); on ANY exception log a warning and return ("template", True, template text).
-        raise NotImplementedError("TODO(phase-3 M5): InsightService.summarise")
+        if self._llm is not None:
+            try:
+                return InsightResult("llm", False, self._llm.generate(data))
+            except Exception as exc:  # noqa: BLE001 - any LLM failure -> graceful fallback
+                log.warning("LLM insight failed, using template: %s", exc)
+                return InsightResult("template", True, self._template.generate(data))
+        return InsightResult("template", False, self._template.generate(data))

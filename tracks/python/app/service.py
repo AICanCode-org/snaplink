@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from . import codes
 from .cache import LinkCache
+from .errors import DuplicateCodeError, alias_taken, expired, not_found
 from .models import CachedLink, DailyClicks, Link
 from .repository import LinkRepository
+from .validation import validate_alias, validate_days, validate_expires_in_days, validate_url
 
 log = logging.getLogger("snaplink.service")
 MAX_CACHE_TTL_SECONDS = 3600
@@ -33,40 +35,85 @@ class LinkService:
         self.clock = clock
         self.code_generator = code_generator
 
-    # ---- create (M2) ----------------------------------------------------
+    # ---- create -------------------------------------------------------
     def create(self, url: object, alias: object = None, expires_in_days: object = None) -> Link:
-        # TODO(phase-3 M2): validate the three inputs, compute expires_at from self.clock(),
-        # insert with the alias (DuplicateCodeError -> errors.alias_taken) or with a random code,
-        # retrying up to MAX_CODE_ATTEMPTS times on DuplicateCodeError (birthday problem, ADR-0001).
-        raise NotImplementedError("TODO(phase-3 M2): LinkService.create")
+        long_url = validate_url(url)
+        custom_alias = validate_alias(alias)
+        days = validate_expires_in_days(expires_in_days)
+        now = self.clock()
+        expires_at = now + timedelta(days=days) if days else None
 
-    # ---- read / delete (M2) -------------------------------------------------
+        if custom_alias:
+            try:
+                return self.repo.insert(custom_alias, long_url, True, now, expires_at)
+            except DuplicateCodeError:
+                raise alias_taken(custom_alias) from None
+
+        # Random codes can collide (birthday problem); the DB unique constraint is the
+        # source of truth, so we retry a few times instead of "check then insert".
+        for _ in range(MAX_CODE_ATTEMPTS):
+            try:
+                return self.repo.insert(self.code_generator(), long_url, False, now, expires_at)
+            except DuplicateCodeError:
+                log.info("short code collision, retrying")
+        raise RuntimeError("could not generate a unique short code")
+
+    # ---- read / delete --------------------------------------------------
     def get(self, code: str) -> Link:
-        # TODO(phase-3 M2): repo.find_by_code, raise errors.not_found(code) when missing.
-        raise NotImplementedError("TODO(phase-3 M2): LinkService.get")
+        link = self.repo.find_by_code(code)
+        if link is None:
+            raise not_found(code)
+        return link
 
     def delete(self, code: str) -> None:
-        # TODO(phase-3 M2): delete from the repo (404 if missing) AND evict it from the cache.
-        raise NotImplementedError("TODO(phase-3 M2): LinkService.delete")
+        if not self.repo.delete(code):
+            raise not_found(code)
+        self.cache.delete(code)
 
-    # ---- redirect hot path (M2 + M3) -------------------------------------------
+    # ---- redirect hot path ----------------------------------------------
     def resolve(self, code: str) -> str:
-        # TODO(phase-3 M2/M3): cache-aside lookup (cache -> repo -> cache.put with _cache_ttl),
-        # 404 if unknown, 410 if expired (also evict it), then record a click. A failing
-        # record_click must be logged and must NOT break the redirect. Return the long URL.
-        raise NotImplementedError("TODO(phase-3 M2): LinkService.resolve")
+        now = self.clock()
+        cached = self.cache.get(code)
+        if cached is None:
+            link = self.repo.find_by_code(code)
+            if link is None:
+                raise not_found(code)
+            cached = CachedLink(id=link.id, long_url=link.long_url, expires_at=link.expires_at)
+            ttl = self._cache_ttl(cached, now)
+            if ttl > 0:
+                self.cache.put(code, cached, ttl)
+        if cached.is_expired(now):
+            self.cache.delete(code)
+            raise expired(code)
+        try:
+            self.repo.record_click(cached.id, now.date())
+        except Exception:  # noqa: BLE001 - a lost click must never break a redirect
+            log.exception("failed to record click for %s", code)
+        return cached.long_url
 
     @staticmethod
     def _cache_ttl(link: CachedLink, now: datetime) -> int:
-        # TODO(phase-3 M3): MAX_CACHE_TTL_SECONDS, but never longer than the time left until expiry.
-        raise NotImplementedError("TODO(phase-3 M3): LinkService._cache_ttl")
+        """A cache entry must never outlive the link's expiry."""
+        if link.expires_at is None:
+            return MAX_CACHE_TTL_SECONDS
+        remaining = int((link.expires_at - now).total_seconds())
+        return min(MAX_CACHE_TTL_SECONDS, remaining)
 
-    # ---- analytics (M4) ---------------------------------------------------------
+    # ---- analytics ------------------------------------------------------
     def stats(self, code: str, days: object = None) -> tuple[Link, list[DailyClicks]]:
-        # TODO(phase-3 M4): validate_days, get the link, return (link, self.daily_series(link, window)).
-        raise NotImplementedError("TODO(phase-3 M4): LinkService.stats")
+        window = validate_days(days)
+        link = self.get(code)
+        return link, self.daily_series(link, window)
 
     def daily_series(self, link: Link, days: int) -> list[DailyClicks]:
-        # TODO(phase-3 M4): one DailyClicks per UTC day for the last `days` days (today included),
-        # oldest first, zero-filled for days without clicks (repo.daily_clicks only returns non-zero days).
-        raise NotImplementedError("TODO(phase-3 M4): LinkService.daily_series")
+        end = self.clock().date()
+        start = end - timedelta(days=days - 1)
+        by_day = {dc.day: dc.clicks for dc in self.repo.daily_clicks(link.id, start, end)}
+        return [DailyClicks(day=d, clicks=by_day.get(d, 0)) for d in _date_range(start, end)]
+
+
+def _date_range(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)

@@ -6,6 +6,8 @@ import threading
 from datetime import date, datetime
 from typing import Protocol
 
+from psycopg import errors as pg_errors
+from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from .errors import DuplicateCodeError
@@ -43,26 +45,49 @@ class PostgresLinkRepository:
         self._pool = pool
 
     def insert(self, code, long_url, custom, created_at, expires_at) -> Link:
-        # TODO(phase-3 M2): INSERT ... RETURNING {_COLUMNS}; map psycopg's UniqueViolation to DuplicateCodeError.
-        raise NotImplementedError("TODO(phase-3 M2): PostgresLinkRepository.insert")
+        try:
+            with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    f"INSERT INTO links (code, long_url, is_custom, created_at, expires_at) "
+                    f"VALUES (%s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+                    (code, long_url, custom, created_at, expires_at),
+                )
+                return _to_link(cur.fetchone())
+        except pg_errors.UniqueViolation as exc:
+            raise DuplicateCodeError(code) from exc
 
     def find_by_code(self, code) -> Link | None:
-        # TODO(phase-3 M2): SELECT {_COLUMNS} FROM links WHERE code = %s
-        # (hint: `from psycopg.rows import dict_row`, cursor(row_factory=dict_row), then _to_link).
-        raise NotImplementedError("TODO(phase-3 M2): PostgresLinkRepository.find_by_code")
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT {_COLUMNS} FROM links WHERE code = %s", (code,))
+            row = cur.fetchone()
+            return _to_link(row) if row else None
 
     def delete(self, code) -> bool:
-        # TODO(phase-3 M2): DELETE ... and return True if a row was deleted (click_daily cascades).
-        raise NotImplementedError("TODO(phase-3 M2): PostgresLinkRepository.delete")
+        with self._pool.connection() as conn:
+            return conn.execute("DELETE FROM links WHERE code = %s", (code,)).rowcount > 0
 
     def record_click(self, link_id, day) -> None:
-        # TODO(phase-3 M3): ONE atomic statement that bumps links.click_count and upserts
-        # click_daily(link_id, day) (hint: a CTE + INSERT ... ON CONFLICT DO UPDATE).
-        raise NotImplementedError("TODO(phase-3 M3): PostgresLinkRepository.record_click")
+        # One statement = one atomic unit: bump the total and upsert the daily bucket.
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                WITH bumped AS (
+                    UPDATE links SET click_count = click_count + 1 WHERE id = %(id)s RETURNING id
+                )
+                INSERT INTO click_daily (link_id, day, clicks)
+                SELECT id, %(day)s, 1 FROM bumped
+                ON CONFLICT (link_id, day) DO UPDATE SET clicks = click_daily.clicks + 1
+                """,
+                {"id": link_id, "day": day},
+            )
 
     def daily_clicks(self, link_id, start, end) -> list[DailyClicks]:
-        # TODO(phase-3 M4): rows of click_daily for link_id with start <= day <= end, ordered by day.
-        raise NotImplementedError("TODO(phase-3 M4): PostgresLinkRepository.daily_clicks")
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT day, clicks FROM click_daily WHERE link_id = %s AND day BETWEEN %s AND %s ORDER BY day",
+                (link_id, start, end),
+            ).fetchall()
+            return [DailyClicks(day=r[0], clicks=r[1]) for r in rows]
 
     def ping(self) -> bool:
         try:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime
 from typing import Protocol
 
 import redis
@@ -58,17 +60,31 @@ class RedisLinkCache:
         self._redis = redis.Redis.from_url(url, socket_timeout=0.5, socket_connect_timeout=0.5, decode_responses=True)
 
     def get(self, code):
-        # TODO(phase-3 M3): GET KEY_PREFIX + code, decode the JSON {"id","url","expiresAt"} into a CachedLink.
-        # Any redis.RedisError -> log a warning and return None (the database is the source of truth).
-        raise NotImplementedError("TODO(phase-3 M3): RedisLinkCache.get")
+        try:
+            raw = self._redis.get(KEY_PREFIX + code)
+        except redis.RedisError as exc:
+            log.warning("cache get failed, falling back to database: %s", exc)
+            return None
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        expires = datetime.fromisoformat(data["expiresAt"]) if data["expiresAt"] else None
+        return CachedLink(id=data["id"], long_url=data["url"], expires_at=expires)
 
     def put(self, code, link, ttl_seconds):
-        # TODO(phase-3 M3): SET KEY_PREFIX + code to that JSON with EX=ttl_seconds; swallow + log RedisError.
-        raise NotImplementedError("TODO(phase-3 M3): RedisLinkCache.put")
+        payload = json.dumps(
+            {"id": link.id, "url": link.long_url, "expiresAt": link.expires_at.isoformat() if link.expires_at else None}
+        )
+        try:
+            self._redis.set(KEY_PREFIX + code, payload, ex=ttl_seconds)
+        except redis.RedisError as exc:
+            log.warning("cache put failed: %s", exc)
 
     def delete(self, code):
-        # TODO(phase-3 M3): DEL KEY_PREFIX + code; swallow + log RedisError.
-        raise NotImplementedError("TODO(phase-3 M3): RedisLinkCache.delete")
+        try:
+            self._redis.delete(KEY_PREFIX + code)
+        except redis.RedisError as exc:
+            log.warning("cache delete failed: %s", exc)
 
     def status(self):
         try:
