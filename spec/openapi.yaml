@@ -1,11 +1,15 @@
 openapi: 3.1.0
 info:
   title: SnapLink API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Language-agnostic contract for the SnapLink URL shortener (AiCanCode project).
     All three implementation tracks (Java, Python, TypeScript) MUST satisfy this contract.
     Errors use RFC 9457 `application/problem+json`.
+
+    v1.1.0 (Phase 7, backward compatible): `Link.lastAccessedAt`, `GET /metrics`, and every
+    response carries an `X-Request-ID` header (the caller's value is echoed when it matches
+    `^[A-Za-z0-9._-]{1,64}$`, otherwise a UUID is generated).
   license:
     name: MIT
 servers:
@@ -33,6 +37,21 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus counters (text exposition format 0.0.4)
+      description: |
+        Exposes exactly these counters in every track: snaplink_links_created_total,
+        snaplink_redirects_total, snaplink_cache_hits_total, snaplink_cache_misses_total,
+        snaplink_insights_fallback_total. Values reset when the process restarts.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Metrics text
+          content:
+            text/plain:
+              schema: { type: string }
   /api/v1/links:
     post:
       tags: [links]
@@ -185,6 +204,10 @@ components:
         createdAt: { type: string, format: date-time }
         expiresAt: { type: [string, "null"], format: date-time }
         clickCount: { type: integer, format: int64 }
+        lastAccessedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Time of the most recent redirect (null = never). Added in v1.1.0.
     DailyClicks:
       type: object
       required: [date, clicks]
