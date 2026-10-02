@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from . import codes
 from .cache import LinkCache
 from .errors import DuplicateCodeError, alias_taken, expired, not_found
+from .metrics import Metrics
 from .models import CachedLink, DailyClicks, Link
 from .repository import LinkRepository
 from .validation import validate_alias, validate_days, validate_expires_in_days, validate_url
@@ -29,11 +30,13 @@ class LinkService:
         cache: LinkCache,
         clock: Callable[[], datetime] = utc_now,
         code_generator: Callable[[], str] = codes.generate_code,
+        metrics: Metrics | None = None,
     ):
         self.repo = repo
         self.cache = cache
         self.clock = clock
         self.code_generator = code_generator
+        self.metrics = metrics or Metrics()
 
     # ---- create -------------------------------------------------------
     def create(self, url: object, alias: object = None, expires_in_days: object = None) -> Link:
@@ -45,17 +48,22 @@ class LinkService:
 
         if custom_alias:
             try:
-                return self.repo.insert(custom_alias, long_url, True, now, expires_at)
+                link = self.repo.insert(custom_alias, long_url, True, now, expires_at)
             except DuplicateCodeError:
                 raise alias_taken(custom_alias) from None
+            self.metrics.inc("snaplink_links_created_total")
+            return link
 
         # Random codes can collide (birthday problem); the DB unique constraint is the
         # source of truth, so we retry a few times instead of "check then insert".
         for _ in range(MAX_CODE_ATTEMPTS):
             try:
-                return self.repo.insert(self.code_generator(), long_url, False, now, expires_at)
+                link = self.repo.insert(self.code_generator(), long_url, False, now, expires_at)
             except DuplicateCodeError:
                 log.info("short code collision, retrying")
+                continue
+            self.metrics.inc("snaplink_links_created_total")
+            return link
         raise RuntimeError("could not generate a unique short code")
 
     # ---- read / delete --------------------------------------------------
@@ -74,6 +82,7 @@ class LinkService:
     def resolve(self, code: str) -> str:
         now = self.clock()
         cached = self.cache.get(code)
+        self.metrics.inc("snaplink_cache_hits_total" if cached else "snaplink_cache_misses_total")
         if cached is None:
             link = self.repo.find_by_code(code)
             if link is None:
@@ -86,9 +95,10 @@ class LinkService:
             self.cache.delete(code)
             raise expired(code)
         try:
-            self.repo.record_click(cached.id, now.date())
+            self.repo.record_click(cached.id, now)
         except Exception:  # noqa: BLE001 - a lost click must never break a redirect
             log.exception("failed to record click for %s", code)
+        self.metrics.inc("snaplink_redirects_total")
         return cached.long_url
 
     @staticmethod

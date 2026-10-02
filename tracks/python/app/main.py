@@ -9,18 +9,20 @@ from typing import Annotated
 
 from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from .cache import LinkCache, NoopCache, RedisLinkCache
 from .config import Settings
 from .db import create_pool, run_migrations
 from .errors import ApiError, validation_error
 from .insights import WINDOW_DAYS, InsightInput, InsightService, LlmInsightGenerator, TemplateInsightGenerator
+from .metrics import Metrics
 from .models import Link
+from .observability import RequestIdMiddleware, configure_logging
 from .repository import LinkRepository, PostgresLinkRepository
 from .service import LinkService, utc_now
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_logging()
 log = logging.getLogger("snaplink")
 PROBLEM_JSON = "application/problem+json"
 
@@ -52,6 +54,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     state: dict = {}
+    metrics = Metrics()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -63,13 +66,14 @@ def create_app(
             log.info("migrations applied this start: %s", applied or "none")
             link_repo = PostgresLinkRepository(pool)
         link_cache = cache or (RedisLinkCache(settings.redis_url) if settings.redis_url else NoopCache())
-        state["service"] = LinkService(link_repo, link_cache, clock)
+        state["service"] = LinkService(link_repo, link_cache, clock, metrics=metrics)
         state["insights"] = insights or build_insight_service(settings)
         yield
         if pool is not None:
             pool.close()
 
-    app = FastAPI(title="SnapLink (Python track)", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="SnapLink (Python track)", version="1.1.0", lifespan=lifespan)
+    app.add_middleware(RequestIdMiddleware)
 
     def service() -> LinkService:
         return state["service"]
@@ -83,6 +87,7 @@ def create_app(
             "createdAt": iso(link.created_at),
             "expiresAt": iso(link.expires_at),
             "clickCount": link.click_count,
+            "lastAccessedAt": iso(link.last_accessed_at),
         }
 
     # ---- error mapping ---------------------------------------------------
@@ -111,6 +116,10 @@ def create_app(
             "checks": {"database": "UP" if db_up else "DOWN", "cache": svc.cache.status()},
         }
         return JSONResponse(body, status_code=200 if db_up else 503)
+
+    @app.get("/metrics")
+    def get_metrics():
+        return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
     @app.post("/api/v1/links", status_code=201)
     def create_link(payload: Annotated[dict, Body()]):
@@ -142,6 +151,8 @@ def create_app(
         link = svc.get(code)
         data = InsightInput(link.code, link.click_count, svc.daily_series(link, WINDOW_DAYS))
         result = state["insights"].summarise(data)
+        if result.fallback:
+            metrics.inc("snaplink_insights_fallback_total")
         return {
             "code": link.code,
             "provider": result.provider,

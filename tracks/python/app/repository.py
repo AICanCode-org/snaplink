@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Protocol
 
 from psycopg import errors as pg_errors
@@ -20,12 +20,12 @@ class LinkRepository(Protocol):
     ) -> Link: ...
     def find_by_code(self, code: str) -> Link | None: ...
     def delete(self, code: str) -> bool: ...
-    def record_click(self, link_id: int, day: date) -> None: ...
+    def record_click(self, link_id: int, at: datetime) -> None: ...
     def daily_clicks(self, link_id: int, start: date, end: date) -> list[DailyClicks]: ...
     def ping(self) -> bool: ...
 
 
-_COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count"
+_COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count, last_accessed_at"
 
 
 def _to_link(row: dict) -> Link:
@@ -37,6 +37,7 @@ def _to_link(row: dict) -> Link:
         created_at=row["created_at"],
         expires_at=row["expires_at"],
         click_count=row["click_count"],
+        last_accessed_at=row["last_accessed_at"],
     )
 
 
@@ -66,19 +67,20 @@ class PostgresLinkRepository:
         with self._pool.connection() as conn:
             return conn.execute("DELETE FROM links WHERE code = %s", (code,)).rowcount > 0
 
-    def record_click(self, link_id, day) -> None:
-        # One statement = one atomic unit: bump the total and upsert the daily bucket.
+    def record_click(self, link_id, at) -> None:
+        # One statement = one atomic unit: bump the total, remember when, upsert the daily bucket.
         with self._pool.connection() as conn:
             conn.execute(
                 """
                 WITH bumped AS (
-                    UPDATE links SET click_count = click_count + 1 WHERE id = %(id)s RETURNING id
+                    UPDATE links SET click_count = click_count + 1, last_accessed_at = %(at)s
+                    WHERE id = %(id)s RETURNING id
                 )
                 INSERT INTO click_daily (link_id, day, clicks)
                 SELECT id, %(day)s, 1 FROM bumped
                 ON CONFLICT (link_id, day) DO UPDATE SET clicks = click_daily.clicks + 1
                 """,
-                {"id": link_id, "day": day},
+                {"id": link_id, "day": at.astimezone(UTC).date(), "at": at},
             )
 
     def daily_clicks(self, link_id, start, end) -> list[DailyClicks]:
@@ -128,11 +130,13 @@ class InMemoryLinkRepository:
             self._clicks = {k: v for k, v in self._clicks.items() if k[0] != link.id}
             return True
 
-    def record_click(self, link_id, day) -> None:
+    def record_click(self, link_id, at) -> None:
+        day = at.astimezone(UTC).date()
         with self._lock:
             for link in self._links.values():
                 if link.id == link_id:
                     link.click_count += 1
+                    link.last_accessed_at = at
                     self._clicks[(link_id, day)] = self._clicks.get((link_id, day), 0) + 1
                     return
 

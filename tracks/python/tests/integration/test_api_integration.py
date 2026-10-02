@@ -38,7 +38,7 @@ def test_health_reports_real_dependencies(client):
 def test_migrations_are_recorded():
     with psycopg.connect(DB_URL) as conn:
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
-    assert versions[0] == 1
+    assert versions[:2] == [1, 2]
 
 
 def test_full_flow_persists_clicks(client):
@@ -48,6 +48,7 @@ def test_full_flow_persists_clicks(client):
     assert client.get(f"/api/v1/links/{code}").json()["clickCount"] == 3
     stats = client.get(f"/api/v1/links/{code}/stats").json()
     assert stats["totalClicks"] == 3 and stats["daily"][-1]["clicks"] == 3
+    assert client.get(f"/api/v1/links/{code}").json()["lastAccessedAt"] is not None  # V2 column
     # The redirect populated the cache
     assert redis.Redis.from_url(REDIS_URL).exists(f"snaplink:link:{code}") == 1
 

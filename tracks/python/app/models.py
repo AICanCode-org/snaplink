@@ -13,6 +13,7 @@ class Link:
     created_at: datetime
     expires_at: datetime | None
     click_count: int = 0
+    last_accessed_at: datetime | None = None  # added in v1.1.0 (V2 migration)
 
     def is_expired(self, now: datetime) -> bool:
         return self.expires_at is not None and now >= self.expires_at
