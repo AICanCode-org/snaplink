@@ -3,6 +3,68 @@
 [![CI](https://github.com/AICanCode-org/snaplink/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AICanCode-org/snaplink/actions/workflows/ci.yml)
 [![CI (solution)](https://github.com/AICanCode-org/snaplink/actions/workflows/ci.yml/badge.svg?branch=solution)](https://github.com/AICanCode-org/snaplink/actions/workflows/ci.yml?query=branch%3Asolution)
 
+## Case study (reference solution)
+
+> **SnapLink shortens URLs, counts clicks and explains a link's traffic in plain English. It is
+> built three times, in Java, Python and TypeScript, against one contract.**
+
+```console
+$ curl -s -X POST localhost:8080/api/v1/links -H 'Content-Type: application/json' \
+    -d '{"url":"https://www.aicancode.org/projects","alias":"projects"}'
+{"code":"projects","shortUrl":"http://localhost:8080/projects", ...}
+$ curl -sI localhost:8080/projects | head -1
+HTTP/1.1 302 Found
+$ curl -s localhost:8080/api/v1/links/projects/insights
+{"code":"projects","provider":"template","fallback":false,"summary":"/projects got 1 clicks in the last 7 days ...", ...}
+```
+
+**Problem → solution.** Long links are unreadable and tell you nothing about who used them. SnapLink
+issues short codes or custom aliases, redirects in a few milliseconds from a Redis cache, keeps per-day
+click counts in PostgreSQL without storing personal data, and summarises traffic with an LLM, or a
+deterministic template when no model is available. It runs on a laptop with one command.
+
+**Architecture.** One stateless API container per track, PostgreSQL (source of truth), and Redis
+(optional read-through cache): see the diagrams in [`spec/architecture.md`](spec/architecture.md).
+Three decisions worth discussing:
+1. Random 7-character base62 codes with retry on collision instead of sequential IDs. Not enumerable, no
+   coordination needed ([ADR-0001](spec/adr/0001-short-code-generation.md)).
+2. `302` instead of `301` redirects, so browsers don't cache the redirect and every click is counted
+   ([ADR-0002](spec/adr/0002-302-redirects.md)). Redis absorbs the extra load as an *optional*
+   read-through cache: every Redis error degrades to PostgreSQL, and the TTL never outlives a link's expiry.
+3. Click counting as one atomic upsert per redirect into a per-day table: simple and privacy-friendly
+   ([ADR-0003](spec/adr/0003-click-counting.md)).
+
+**Quality evidence (v1.1.0, measured on the maintainers' Linux build box with Docker).**
+
+| | Java 21 / Spring Boot | Python / FastAPI | TypeScript / Fastify |
+|---|---|---|---|
+| Tests (unit + integration) | 75 | 88 | 85 |
+| Line coverage (gate 85 %) | 91.2 % | 96.8 % | 95.9 % |
+| Docker smoke test (`scripts/smoke-test.sh`) | 27/27 | 27/27 | 27/27 |
+| Avg redirect, warm cache (50 requests, client side) | 6.7 ms | 3.8 ms | 3.4 ms |
+
+Every phase tag (`phase-0-end` … `phase-8-end`) builds and passes the tests of all three tracks
+(`scripts/verify-tags.sh`). CI runs lint, unit and integration tests against service containers, a
+coverage gate, and a Docker smoke test per track. Release tags publish images to GHCR.
+
+**Operations.** `/health` reports database and cache separately (a Redis outage is *degraded*, not
+*down*). `/metrics` exposes Prometheus counters, and every log line is JSON with the request's
+`X-Request-ID`. A **game day** that stopped Redis found that the Python track slowed to ~16 s per
+redirect because DNS lookups are not covered by socket timeouts. A circuit breaker fixed it in
+v1.1.0: [post-mortem](docs/postmortem-2026-10-02-redis-down.md), [runbook](docs/runbook.md).
+
+**How AI was used.** Assistants drafted Dockerfiles, workflow skeletons, test scaffolding and
+first versions of docs. They were confidently wrong about version-specific details, e.g. deprecated
+framework options and a deploy-hook parameter that had to be checked against the provider's docs. Every
+suggestion was verified by tests, `actionlint`, the smoke test or official documentation, and logged in
+[`AI_LOG.md`](AI_LOG.md). See also [`docs/retrospective.md`](docs/retrospective.md).
+
+**What I'd do next.** Rate limiting on link creation (it is unauthenticated); a degraded-mode latency
+budget enforced by a game day in CI; OpenTelemetry tracing; a small dashboard UI; a k6 load test to
+check NFR-1 (p95 < 50 ms) under load.
+
+---
+
 SnapLink is the guided pilot project of **[AiCanCode](https://www.aicancode.org)**. Over 9 phases
 (about 28 hours) you build a URL shortener like a professional team would: requirements, design, a
 test-first implementation, CI/CD, containers, observability and a retrospective. AI assistants help
