@@ -60,6 +60,7 @@ request GET "/$CODE" >/dev/null
 request GET "/api/v1/links/$CODE"
 expect 200 "GET /api/v1/links/$CODE"
 [ "$(json_num clickCount)" = "2" ] && ok "clickCount=2 after two redirects" || bad "clickCount=2 (got $(json_num clickCount))"
+[ -n "$(json_str lastAccessedAt)" ] && ok "lastAccessedAt is set (v1.1)" || bad "lastAccessedAt is set (v1.1)"
 
 request GET "/api/v1/links/$CODE/stats?days=7"
 expect 200 "GET stats"
@@ -75,6 +76,14 @@ if [ -n "${EXPECT_FALLBACK:-}" ]; then
   [ "$(json_bool fallback)" = "$EXPECT_FALLBACK" ] && ok "insights fallback=$EXPECT_FALLBACK as expected" || bad "insights fallback expected $EXPECT_FALLBACK"
 fi
 grep -q "\"summary\"" "$TMP" && ok "insights summary: $(json_str summary | head -c 110)" || bad "insights has a summary"
+
+# ---- v1.1 observability (Phase 7) ----
+HEADERS="$(curl -s -o /dev/null -D - -H 'X-Request-ID: smoke-req-1' "$BASE_URL/health" | tr -d '\r')"
+[ "$(header X-Request-ID)" = "smoke-req-1" ] && ok "X-Request-ID is echoed (v1.1)" || bad "X-Request-ID is echoed (v1.1)"
+request GET /metrics
+expect 200 "GET /metrics (v1.1)"
+REDIRECTS="$(sed -n 's/^snaplink_redirects_total \([0-9][0-9]*\)$/\1/p' "$TMP")"
+[ "${REDIRECTS:-0}" -ge 2 ] 2>/dev/null && ok "snaplink_redirects_total=$REDIRECTS" || bad "snaplink_redirects_total >= 2"
 
 request GET /no-such-link-xyz
 expect 404 "unknown code is 404"

@@ -74,3 +74,18 @@ Cursor, Claude, a local Ollama model, …) produced something you kept, changed 
   test 23/23 for every track. Not verified: a real GHCR push or Render deploy (no GitHub run yet).
 * **Time saved / lost (honest guess):** saved ~1 h.
 * **What I learned:** for anything that talks to a third-party API, the provider's docs are the only source of truth.
+
+### 2026-10-02 · Phase 7 · Request IDs, JSON logs and the game day
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Add an X-Request-ID that is validated, echoed and present on every JSON log line, in Spring Boot 4, FastAPI and Fastify 5, with no new dependencies.
+* **What it produced:** working code for all three. The Fastify version used the top-level
+  `requestIdLogLabel` option.
+* **What I kept / changed / rejected and why:** the container logs showed Fastify's deprecation warning
+  FSTDEP024 for that option, so it now uses `logController: new LogController({ requestIdLogLabel: "requestId" })`
+  as the warning says. The game day then showed the Python cache taking ~16 s per redirect with Redis
+  stopped: DNS resolution is not covered by socket timeouts. A small circuit breaker fixed it.
+* **How I verified it:** smoke test 27/27 per track; `docker compose logs` read line by line; `scripts/game-day.sh`
+  before and after the fix (50 redirects with Redis stopped: avg 164 ms, down from ~16 s per request).
+* **Time saved / lost (honest guess):** saved ~1 h on logging plumbing; the game day itself took 30 min and was worth it.
+* **What I learned:** read the real logs and measure under the real failure. Passing tests didn't show either problem.
