@@ -1,10 +1,17 @@
 package org.aicancode.snaplink.link;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.aicancode.snaplink.cache.LinkCache;
+import org.aicancode.snaplink.web.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,43 +46,91 @@ public class LinkService {
         return clock.instant();
     }
 
-    // ---- create (M2) -------------------------------------------------------
+    // ---- create -----------------------------------------------------------
     public Link create(Object url, Object alias, Object expiresInDays) {
-        // TODO(phase-3 M2): validate the three inputs, compute expiresAt from clock.instant(), insert with the
-        // alias (DuplicateCodeException -> ApiException.aliasTaken) or with codeGenerator.get(), retrying up to
-        // MAX_CODE_ATTEMPTS times on DuplicateCodeException (birthday problem, ADR-0001).
-        throw new UnsupportedOperationException("TODO(phase-3 M2): LinkService.create");
+        String longUrl = Validation.validateUrl(url);
+        String customAlias = Validation.validateAlias(alias);
+        Integer days = Validation.validateExpiresInDays(expiresInDays);
+        Instant now = clock.instant();
+        Instant expiresAt = days == null ? null : now.plus(Duration.ofDays(days));
+
+        if (customAlias != null) {
+            try {
+                return repo.insert(customAlias, longUrl, true, now, expiresAt);
+            } catch (DuplicateCodeException e) {
+                throw ApiException.aliasTaken(customAlias);
+            }
+        }
+        // Random codes can collide (birthday problem); the DB unique constraint is the
+        // source of truth, so we retry a few times instead of "check then insert".
+        for (int attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+            try {
+                return repo.insert(codeGenerator.get(), longUrl, false, now, expiresAt);
+            } catch (DuplicateCodeException e) {
+                LOG.info("short code collision, retrying");
+            }
+        }
+        throw new IllegalStateException("could not generate a unique short code");
     }
 
-    // ---- read / delete (M2) ------------------------------------------------
+    // ---- read / delete ----------------------------------------------------
     public Link get(String code) {
-        // TODO(phase-3 M2): repo.findByCode, ApiException.notFound(code) when missing.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): LinkService.get");
+        return repo.findByCode(code).orElseThrow(() -> ApiException.notFound(code));
     }
 
     public void delete(String code) {
-        // TODO(phase-3 M2): delete from the repo (404 if missing) AND evict it from the cache.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): LinkService.delete");
+        if (!repo.delete(code)) {
+            throw ApiException.notFound(code);
+        }
+        cache.delete(code);
     }
 
-    // ---- redirect hot path (M2 + M3) -----------------------------------------
+    // ---- redirect hot path ------------------------------------------------
     public String resolve(String code) {
-        // TODO(phase-3 M2/M3): cache-aside lookup (cache -> repo -> cache.put with cacheTtl), 404 if unknown,
-        // 410 if expired (also evict it), then repo.recordClick(id, UTC date). A failing recordClick must be
-        // logged with LOG.error and must NOT break the redirect. Return the long URL.
-        throw new UnsupportedOperationException("TODO(phase-3 M2): LinkService.resolve");
+        Instant now = clock.instant();
+        CachedLink cached = cache.get(code).orElse(null);
+        if (cached == null) {
+            Link link = repo.findByCode(code).orElseThrow(() -> ApiException.notFound(code));
+            cached = new CachedLink(link.id(), link.longUrl(), link.expiresAt());
+            long ttl = cacheTtl(cached, now);
+            if (ttl > 0) {
+                cache.put(code, cached, ttl);
+            }
+        }
+        if (cached.isExpired(now)) {
+            cache.delete(code);
+            throw ApiException.expired(code);
+        }
+        try {
+            repo.recordClick(cached.id(), LocalDate.ofInstant(now, ZoneOffset.UTC));
+        } catch (RuntimeException e) {
+            // A lost click must never break a redirect.
+            LOG.error("failed to record click for {}", code, e);
+        }
+        return cached.longUrl();
     }
 
     /** A cache entry must never outlive the link's expiry. */
     public static long cacheTtl(CachedLink link, Instant now) {
-        // TODO(phase-3 M3): MAX_CACHE_TTL_SECONDS, but never longer than the seconds left until expiry.
-        throw new UnsupportedOperationException("TODO(phase-3 M3): LinkService.cacheTtl");
+        if (link.expiresAt() == null) {
+            return MAX_CACHE_TTL_SECONDS;
+        }
+        long remaining = Duration.between(now, link.expiresAt()).toSeconds();
+        return Math.min(MAX_CACHE_TTL_SECONDS, remaining);
     }
 
-    // ---- analytics (M4) -------------------------------------------------------
+    // ---- analytics --------------------------------------------------------
     public List<DailyClicks> dailySeries(Link link, int days) {
-        // TODO(phase-3 M4): one DailyClicks per UTC day for the last `days` days (today included), oldest first,
-        // zero-filled (repo.dailyClicks only returns days that had clicks).
-        throw new UnsupportedOperationException("TODO(phase-3 M4): LinkService.dailySeries");
+        LocalDate end = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
+        LocalDate start = end.minusDays(days - 1L);
+        Map<LocalDate, Long> byDay = new HashMap<>();
+        for (DailyClicks dc : repo.dailyClicks(link.id(), start, end)) {
+            byDay.put(dc.day(), dc.clicks());
+        }
+        List<DailyClicks> series = new ArrayList<>(days);
+        for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
+            series.add(new DailyClicks(d, byDay.getOrDefault(d, 0L)));
+        }
+        return series;
     }
 }
