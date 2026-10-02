@@ -44,3 +44,17 @@ Cursor, Claude, a local Ollama model, …) produced something you kept, changed 
   `make lint test` in each track (1 passed, the rest skipped as pending).
 * **Time saved / lost (honest guess):** saved ~10 min.
 * **What I learned:** the `docker` group is effectively root access, so it is worth knowing what you are granting.
+
+### 2026-10-02 · Phase 3 · Reviewing the expiry tests, not just the code
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Review the expiry tests for the redirect endpoint. Do they prove that an expired link is never counted as a click?
+* **What it produced:** the observation that the tests asserted `410 Gone` for an expired link but never
+  checked the click counter, so an implementation that counted the click *and then* returned `410`
+  would still pass.
+* **What I kept / changed / rejected and why:** kept it. Every track's expiry test now also asserts that
+  only the successful, pre-expiry redirect was counted (`clickCount == 1`).
+* **How I verified it:** `make coverage` in all three tracks still passes with the stronger assertion
+  (Java 70, Python 77, TypeScript 80 tests at v1.0).
+* **Time saved / lost (honest guess):** 10 minutes for a test that now guards FR-5.
+* **What I learned:** ask the assistant to attack your tests, not only your code. A green test can still prove too little.
