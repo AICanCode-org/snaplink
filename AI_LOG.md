@@ -58,3 +58,19 @@ Cursor, Claude, a local Ollama model, …) produced something you kept, changed 
   (Java 70, Python 77, TypeScript 80 tests at v1.0).
 * **Time saved / lost (honest guess):** 10 minutes for a test that now guards FR-5.
 * **What I learned:** ask the assistant to attack your tests, not only your code. A green test can still prove too little.
+
+### 2026-10-02 · Phase 6 · Deploy workflow and the Render deploy hook
+* **Tool / model:** AI coding agent
+* **Prompt (summary):**
+  > Write `deploy.yml`: on `v*.*.*` push images to GHCR with GITHUB_TOKEN, then optionally trigger a Render deploy of that exact image, skipped when the secret is missing.
+* **What it produced:** the GHCR job (`packages: write`, lower-cased owner, metadata-action tags) and a
+  Render job calling the deploy hook.
+* **What I kept / changed / rejected and why:** kept both, after checking the hook call against Render's
+  documentation: a `POST` to the hook URL with a URL-encoded `imgURL` query parameter. The secret goes
+  through `env:` because secrets cannot be used in `if:` conditions. We also chose not to present Fly.io
+  as a free option, because it has no general free tier for new accounts.
+* **How I verified it:** Render's deploy-hook docs; `actionlint` with shellcheck (it flagged an unused loop
+  variable, SC2034, fixed with `for _ in …`); local `docker compose --profile <track> up --build` + smoke
+  test 23/23 for every track. Not verified: a real GHCR push or Render deploy (no GitHub run yet).
+* **Time saved / lost (honest guess):** saved ~1 h.
+* **What I learned:** for anything that talks to a third-party API, the provider's docs are the only source of truth.

@@ -1,7 +1,27 @@
-# SnapLink local stack (starter): PostgreSQL + Redis for running a track on your machine.
-#   docker compose up -d postgres redis      then   cd tracks/<track> && make run
-# In Phase 6 you add the app itself as a service (one profile per track).
+# SnapLink local stack. Start infra only:   docker compose up -d postgres redis
+# Start infra + one app track:             docker compose --profile python up --build
 name: snaplink
+
+x-app-env: &app-env
+  PORT: "8080"
+  DATABASE_URL: postgresql://snaplink:snaplink@postgres:5432/snaplink
+  REDIS_URL: redis://redis:6379/0
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  MIGRATIONS_DIR: /app/migrations
+  INSIGHTS_PROVIDER: ${INSIGHTS_PROVIDER:-template}
+  LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+  LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-5000}
+
+x-app-common: &app-common
+  environment: *app-env
+  ports:
+    - "${APP_PORT:-8080}:8080"
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  restart: unless-stopped
 
 services:
   postgres:
@@ -31,9 +51,26 @@ services:
       timeout: 3s
       retries: 20
 
-  # Optional local LLM (Phase 3 M5):  docker compose --profile ollama up -d
-  # then: docker compose exec ollama ollama pull llama3.2:1b  and run your track with
-  #       INSIGHTS_PROVIDER=llm LLM_BASE_URL=http://localhost:11434/v1
+  app-java:
+    <<: *app-common
+    profiles: ["java"]
+    build: { context: ., dockerfile: tracks/java/Dockerfile }
+    image: snaplink-java:local
+
+  app-python:
+    <<: *app-common
+    profiles: ["python"]
+    build: { context: ., dockerfile: tracks/python/Dockerfile }
+    image: snaplink-python:local
+
+  app-typescript:
+    <<: *app-common
+    profiles: ["typescript"]
+    build: { context: ., dockerfile: tracks/typescript/Dockerfile }
+    image: snaplink-typescript:local
+
+  # Optional local LLM:  docker compose --profile python --profile ollama up -d
+  # then: docker compose exec ollama ollama pull llama3.2:1b  and set INSIGHTS_PROVIDER=llm
   ollama:
     profiles: ["ollama"]
     image: ollama/ollama:latest
