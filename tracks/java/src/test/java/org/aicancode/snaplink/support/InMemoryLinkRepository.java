@@ -2,6 +2,7 @@ package org.aicancode.snaplink.support;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -26,7 +27,7 @@ public class InMemoryLinkRepository implements LinkRepository {
         if (links.containsKey(code)) {
             throw new DuplicateCodeException(code);
         }
-        Link link = new Link(nextId++, code, longUrl, custom, createdAt, expiresAt, 0);
+        Link link = new Link(nextId++, code, longUrl, custom, createdAt, expiresAt, 0, null);
         links.put(code, link);
         return link;
     }
@@ -47,14 +48,15 @@ public class InMemoryLinkRepository implements LinkRepository {
     }
 
     @Override
-    public synchronized void recordClick(long linkId, LocalDate day) {
+    public synchronized void recordClick(long linkId, Instant at) {
         if (failClicks) {
             throw new IllegalStateException("db hiccup");
         }
         links.replaceAll((code, l) -> l.id() == linkId
-                ? new Link(l.id(), l.code(), l.longUrl(), l.custom(), l.createdAt(), l.expiresAt(), l.clickCount() + 1)
+                ? new Link(l.id(), l.code(), l.longUrl(), l.custom(), l.createdAt(), l.expiresAt(),
+                        l.clickCount() + 1, at)
                 : l);
-        clicks.merge(linkId + "|" + day, 1L, Long::sum);
+        clicks.merge(linkId + "|" + LocalDate.ofInstant(at, ZoneOffset.UTC), 1L, Long::sum);
     }
 
     @Override

@@ -12,6 +12,7 @@ import org.aicancode.snaplink.link.DailyClicks;
 import org.aicancode.snaplink.link.Link;
 import org.aicancode.snaplink.link.LinkService;
 import org.aicancode.snaplink.link.Validation;
+import org.aicancode.snaplink.metrics.Metrics;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -72,6 +73,9 @@ public class LinkController {
         Link link = service.get(code);
         List<DailyClicks> daily = service.dailySeries(link, InsightInput.WINDOW_DAYS);
         InsightResult result = insights.summarise(new InsightInput(link.code(), link.clickCount(), daily));
+        if (result.fallback()) {
+            service.metrics().inc(Metrics.INSIGHTS_FALLBACK);
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("code", link.code());
         body.put("provider", result.provider());
@@ -90,6 +94,7 @@ public class LinkController {
         body.put("createdAt", Iso.format(link.createdAt()));
         body.put("expiresAt", Iso.format(link.expiresAt()));
         body.put("clickCount", link.clickCount());
+        body.put("lastAccessedAt", Iso.format(link.lastAccessedAt()));
         return body;
     }
 }

@@ -14,7 +14,8 @@ public interface LinkRepository {
 
     boolean delete(String code);
 
-    void recordClick(long linkId, LocalDate day);
+    /** Count one click at {@code at}: total, last-accessed time and the UTC daily bucket. */
+    void recordClick(long linkId, Instant at);
 
     List<DailyClicks> dailyClicks(long linkId, LocalDate start, LocalDate end);
 

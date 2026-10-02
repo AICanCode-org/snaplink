@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
@@ -13,7 +14,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 /** PostgreSQL adapter using Spring's JdbcClient (plain SQL, no ORM magic). */
 public class JdbcLinkRepository implements LinkRepository {
 
-    private static final String COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count";
+    private static final String COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count, last_accessed_at";
 
     private final JdbcClient jdbc;
 
@@ -49,17 +50,17 @@ public class JdbcLinkRepository implements LinkRepository {
     }
 
     @Override
-    public void recordClick(long linkId, LocalDate day) {
-        // One statement = one atomic unit: bump the total and upsert the daily bucket.
+    public void recordClick(long linkId, Instant at) {
+        // One statement = one atomic unit: bump the total, remember when, upsert the daily bucket.
         jdbc.sql("""
                 WITH bumped AS (
-                    UPDATE links SET click_count = click_count + 1 WHERE id = ? RETURNING id
+                    UPDATE links SET click_count = click_count + 1, last_accessed_at = ? WHERE id = ? RETURNING id
                 )
                 INSERT INTO click_daily (link_id, day, clicks)
                 SELECT id, ?, 1 FROM bumped
                 ON CONFLICT (link_id, day) DO UPDATE SET clicks = click_daily.clicks + 1
                 """)
-                .params(linkId, day)
+                .params(Timestamp.from(at), linkId, LocalDate.ofInstant(at, ZoneOffset.UTC))
                 .update();
     }
 
@@ -82,8 +83,9 @@ public class JdbcLinkRepository implements LinkRepository {
 
     private static Link mapLink(ResultSet rs, int rowNum) throws SQLException {
         Timestamp expires = rs.getTimestamp("expires_at");
+        Timestamp accessed = rs.getTimestamp("last_accessed_at");
         return new Link(rs.getLong("id"), rs.getString("code"), rs.getString("long_url"), rs.getBoolean("is_custom"),
                 rs.getTimestamp("created_at").toInstant(), expires == null ? null : expires.toInstant(),
-                rs.getLong("click_count"));
+                rs.getLong("click_count"), accessed == null ? null : accessed.toInstant());
     }
 }

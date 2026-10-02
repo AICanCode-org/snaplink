@@ -96,8 +96,8 @@ class ApiIntegrationTest {
 
     @Test
     void recordsAppliedMigrations() {
-        Integer first = jdbcClient.sql("SELECT min(version) FROM schema_migrations").query(Integer.class).single();
-        assertThat(first).isEqualTo(1);
+        assertThat(jdbcClient.sql("SELECT version FROM schema_migrations ORDER BY version").query(Integer.class).list())
+                .startsWith(1, 2);
     }
 
     @Test
@@ -107,6 +107,7 @@ class ApiIntegrationTest {
             assertThat(send("GET", "/" + code, null).statusCode()).isEqualTo(302);
         }
         assertThat(send("GET", "/api/v1/links/" + code, null).body()).contains("\"clickCount\":3");
+        assertThat(send("GET", "/api/v1/links/" + code, null).body()).doesNotContain("\"lastAccessedAt\":null");
         assertThat(send("GET", "/api/v1/links/" + code + "/stats", null).body()).contains("\"totalClicks\":3");
         assertThat(redis.sync().exists(RedisLinkCache.KEY_PREFIX + code)).isEqualTo(1L);
     }

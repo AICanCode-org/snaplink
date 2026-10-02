@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.aicancode.snaplink.cache.LinkCache;
+import org.aicancode.snaplink.metrics.Metrics;
 import org.aicancode.snaplink.web.ApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,12 +27,23 @@ public class LinkService {
     private final LinkCache cache;
     private final Clock clock;
     private final Supplier<String> codeGenerator;
+    private final Metrics metrics;
 
     public LinkService(LinkRepository repo, LinkCache cache, Clock clock, Supplier<String> codeGenerator) {
+        this(repo, cache, clock, codeGenerator, new Metrics());
+    }
+
+    public LinkService(LinkRepository repo, LinkCache cache, Clock clock, Supplier<String> codeGenerator,
+                       Metrics metrics) {
         this.repo = repo;
         this.cache = cache;
         this.clock = clock;
         this.codeGenerator = codeGenerator;
+        this.metrics = metrics;
+    }
+
+    public Metrics metrics() {
+        return metrics;
     }
 
     public LinkRepository repository() {
@@ -55,20 +67,27 @@ public class LinkService {
         Instant expiresAt = days == null ? null : now.plus(Duration.ofDays(days));
 
         if (customAlias != null) {
+            Link link;
             try {
-                return repo.insert(customAlias, longUrl, true, now, expiresAt);
+                link = repo.insert(customAlias, longUrl, true, now, expiresAt);
             } catch (DuplicateCodeException e) {
                 throw ApiException.aliasTaken(customAlias);
             }
+            metrics.inc(Metrics.LINKS_CREATED);
+            return link;
         }
         // Random codes can collide (birthday problem); the DB unique constraint is the
         // source of truth, so we retry a few times instead of "check then insert".
         for (int attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+            Link link;
             try {
-                return repo.insert(codeGenerator.get(), longUrl, false, now, expiresAt);
+                link = repo.insert(codeGenerator.get(), longUrl, false, now, expiresAt);
             } catch (DuplicateCodeException e) {
                 LOG.info("short code collision, retrying");
+                continue;
             }
+            metrics.inc(Metrics.LINKS_CREATED);
+            return link;
         }
         throw new IllegalStateException("could not generate a unique short code");
     }
@@ -89,6 +108,7 @@ public class LinkService {
     public String resolve(String code) {
         Instant now = clock.instant();
         CachedLink cached = cache.get(code).orElse(null);
+        metrics.inc(cached != null ? Metrics.CACHE_HITS : Metrics.CACHE_MISSES);
         if (cached == null) {
             Link link = repo.findByCode(code).orElseThrow(() -> ApiException.notFound(code));
             cached = new CachedLink(link.id(), link.longUrl(), link.expiresAt());
@@ -102,11 +122,12 @@ public class LinkService {
             throw ApiException.expired(code);
         }
         try {
-            repo.recordClick(cached.id(), LocalDate.ofInstant(now, ZoneOffset.UTC));
+            repo.recordClick(cached.id(), now);
         } catch (RuntimeException e) {
             // A lost click must never break a redirect.
             LOG.error("failed to record click for {}", code, e);
         }
+        metrics.inc(Metrics.REDIRECTS);
         return cached.longUrl();
     }
 
