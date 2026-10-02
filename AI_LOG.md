@@ -26,3 +26,21 @@ Cursor, Claude, a local Ollama model, …) produced something you kept, changed 
 ## My entries
 
 <!-- Start below this line. Phase 0 asks you to write your first entry. -->
+
+> The reference solution was written by the AiCanCode maintainers working with an AI coding agent.
+> These entries record checks that really happened while building it. Your entries will be about *your* work.
+
+### 2026-10-02 · Phase 0 · Toolchain check on the build machine
+* **Tool / model:** AI coding agent (chat + shell)
+* **Prompt (summary):**
+  > Here is the output of `scripts/doctor.sh`. Everything is green except "docker daemon not reachable". What does that mean and how do I fix it safely?
+* **What it produced:** the explanation that the Docker socket belongs to the `docker` group, with two
+  options: add the user to the group (`sudo usermod -aG docker $USER`, then log out and in) or prefix
+  Docker commands with `sudo`.
+* **What I kept / changed / rejected and why:** on a shared build machine I kept `sudo docker …` rather
+  than changing group membership. On a personal laptop the group is the normal fix.
+* **How I verified it:** `sudo docker compose up -d postgres redis` → both `healthy`; `make run` in the
+  Python starter, then `curl localhost:8080/health` → `{"status":"UP","checks":{"database":"UP","cache":"UP"}}`;
+  `make lint test` in each track (1 passed, the rest skipped as pending).
+* **Time saved / lost (honest guess):** saved ~10 min.
+* **What I learned:** the `docker` group is effectively root access, so it is worth knowing what you are granting.
