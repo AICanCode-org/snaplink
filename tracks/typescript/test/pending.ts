@@ -7,11 +7,6 @@ import { describe } from "vitest";
 // See docs/phase-3.
 // ---------------------------------------------------------------------------
 export const PENDING = new Set<string>([
-  "codes", // Phase 3 M1 - short codes
-  "validation", // Phase 3 M1 - validation
-  "service", // Phase 3 M2-M4 - LinkService
-  "api", // Phase 3 M2-M4 - HTTP API
-  "insights", // Phase 3 M5 - insights
   "integration", // Phase 4 - integration tests
 ]);
 

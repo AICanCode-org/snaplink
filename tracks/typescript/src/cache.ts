@@ -69,20 +69,37 @@ export class RedisLinkCache implements LinkCache {
     }
   }
 
-  async get(code: string): Promise<CachedLink | null> {
-    // TODO(phase-3 M3): GET KEY_PREFIX + code and JSON-decode {id, url, expiresAt} into a CachedLink.
-    // Any error -> this.warn(...) and return null (the database is the source of truth).
-    throw new Error("TODO(phase-3 M3): RedisLinkCache.get");
+  async get(code: string) {
+    try {
+      const raw = await this.redis.get(KEY_PREFIX + code);
+      if (raw === null) return null;
+      const data = JSON.parse(raw) as { id: number; url: string; expiresAt: string | null };
+      return { id: data.id, longUrl: data.url, expiresAt: data.expiresAt ? new Date(data.expiresAt) : null };
+    } catch (err) {
+      this.warn(`cache get failed, falling back to database: ${(err as Error).message}`);
+      return null;
+    }
   }
 
-  async put(code: string, link: CachedLink, ttlSeconds: number): Promise<void> {
-    // TODO(phase-3 M3): SET KEY_PREFIX + code to that JSON with "EX", ttlSeconds; swallow + warn on errors.
-    throw new Error("TODO(phase-3 M3): RedisLinkCache.put");
+  async put(code: string, link: CachedLink, ttlSeconds: number) {
+    const payload = JSON.stringify({
+      id: link.id,
+      url: link.longUrl,
+      expiresAt: link.expiresAt ? link.expiresAt.toISOString() : null,
+    });
+    try {
+      await this.redis.set(KEY_PREFIX + code, payload, "EX", ttlSeconds);
+    } catch (err) {
+      this.warn(`cache put failed: ${(err as Error).message}`);
+    }
   }
 
-  async delete(code: string): Promise<void> {
-    // TODO(phase-3 M3): DEL KEY_PREFIX + code; swallow + warn on errors.
-    throw new Error("TODO(phase-3 M3): RedisLinkCache.delete");
+  async delete(code: string) {
+    try {
+      await this.redis.del(KEY_PREFIX + code);
+    } catch (err) {
+      this.warn(`cache delete failed: ${(err as Error).message}`);
+    }
   }
 
   async status(): Promise<CacheStatus> {

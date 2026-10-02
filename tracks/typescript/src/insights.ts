@@ -13,12 +13,30 @@ export interface InsightGenerator {
   generate(data: InsightInput): Promise<string>;
 }
 
-/** Deterministic, offline, free. Identical wording in all three tracks (spec/requirements.md FR-9). */
+const clicks = (n: number) => (n === 1 ? `${n} click` : `${n} clicks`);
+const sum = (xs: DailyClicks[]) => xs.reduce((acc, d) => acc + d.clicks, 0);
+
+/** Deterministic, offline, free. Identical wording in all three tracks. */
 export class TemplateInsightGenerator implements InsightGenerator {
   async generate(data: InsightInput): Promise<string> {
-    // TODO(phase-3 M5): build the exact sentence from the spec: total clicks in the window,
-    // busiest day (earliest wins ties), trend = last half vs first half of the window.
-    throw new Error("TODO(phase-3 M5): TemplateInsightGenerator.generate");
+    const total = sum(data.daily);
+    if (total === 0) {
+      return (
+        `/${data.code} had no clicks in the last ${WINDOW_DAYS} days ` +
+        `(all-time: ${data.allTimeClicks}). Share it where your audience hangs out!`
+      );
+    }
+    let busiest = data.daily[0]!;
+    for (const day of data.daily.slice(1)) if (day.clicks > busiest.clicks) busiest = day; // earliest wins ties
+    const half = Math.floor(data.daily.length / 2);
+    const previous = sum(data.daily.slice(0, half));
+    const recent = sum(data.daily.slice(data.daily.length - half));
+    const trend = recent > previous ? "up" : recent < previous ? "down" : "steady";
+    return (
+      `/${data.code} got ${clicks(total)} in the last ${WINDOW_DAYS} days ` +
+      `(all-time: ${data.allTimeClicks}). Busiest day: ${busiest.day} ` +
+      `with ${clicks(busiest.clicks)}. Trend: ${trend} compared with earlier in the week.`
+    );
   }
 }
 
@@ -37,10 +55,32 @@ export class LlmInsightGenerator implements InsightGenerator {
   ) {}
 
   async generate(data: InsightInput): Promise<string> {
-    // TODO(phase-3 M5): POST `${this.baseUrl}/chat/completions` with this.fetchImpl, a Bearer header when
-    // apiKey is set, AbortSignal.timeout(this.timeoutMs), SYSTEM_PROMPT + the facts as JSON
-    // (temperature 0.2, max_tokens 120). Throw on !response.ok or an empty answer.
-    throw new Error("TODO(phase-3 M5): LlmInsightGenerator.generate");
+    const facts = {
+      code: data.code,
+      allTimeClicks: data.allTimeClicks,
+      daily: data.daily.map((d) => ({ date: d.day, clicks: d.clicks })),
+    };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0.2,
+        max_tokens: 120,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: "Summarise these click stats:\n" + JSON.stringify(facts) },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
+    const json = (await response.json()) as { choices?: { message?: { content?: string } }[] };
+    const text = json.choices?.[0]?.message?.content?.trim();
+    if (!text) throw new Error("empty LLM response");
+    return text;
   }
 }
 
@@ -58,8 +98,14 @@ export class InsightService {
   ) {}
 
   async summarise(data: InsightInput): Promise<InsightResult> {
-    // TODO(phase-3 M5): no LLM -> template (fallback false). With an LLM: try it -> provider "llm";
-    // on ANY error this.log.warn(...) and return the template text with fallback true.
-    throw new Error("TODO(phase-3 M5): InsightService.summarise");
+    if (this.llm) {
+      try {
+        return { provider: "llm", fallback: false, summary: await this.llm.generate(data) };
+      } catch (err) {
+        this.log.warn(`LLM insight failed, using template: ${(err as Error).message}`);
+        return { provider: "template", fallback: true, summary: await this.template.generate(data) };
+      }
+    }
+    return { provider: "template", fallback: false, summary: await this.template.generate(data) };
   }
 }

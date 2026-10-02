@@ -22,7 +22,7 @@ export interface LinkRepository {
 pg.types.setTypeParser(20, (v) => Number.parseInt(v, 10));
 pg.types.setTypeParser(1082, (v) => v);
 
-export const COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count";
+const COLUMNS = "id, code, long_url, is_custom, created_at, expires_at, click_count";
 
 interface LinkRow {
   id: number;
@@ -34,7 +34,7 @@ interface LinkRow {
   click_count: number;
 }
 
-export const toLink = (r: LinkRow): Link => ({
+const toLink = (r: LinkRow): Link => ({
   id: r.id,
   code: r.code,
   longUrl: r.long_url,
@@ -47,37 +47,49 @@ export const toLink = (r: LinkRow): Link => ({
 export class PgLinkRepository implements LinkRepository {
   constructor(private readonly pool: pg.Pool) {}
 
-  async insert(
-    code: string,
-    longUrl: string,
-    custom: boolean,
-    createdAt: Date,
-    expiresAt: Date | null,
-  ): Promise<Link> {
-    // TODO(phase-3 M2): INSERT ... RETURNING ${COLUMNS}; map Postgres error code 23505 to DuplicateCodeError.
-    // Use toLink(rows[0]) to convert the row.
-    throw new Error("TODO(phase-3 M2): PgLinkRepository.insert");
+  async insert(code: string, longUrl: string, custom: boolean, createdAt: Date, expiresAt: Date | null) {
+    try {
+      const { rows } = await this.pool.query<LinkRow>(
+        `INSERT INTO links (code, long_url, is_custom, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5) RETURNING ${COLUMNS}`,
+        [code, longUrl, custom, createdAt, expiresAt],
+      );
+      return toLink(rows[0]!);
+    } catch (err) {
+      if ((err as { code?: string }).code === "23505") throw new DuplicateCodeError(code);
+      throw err;
+    }
   }
 
-  async findByCode(code: string): Promise<Link | null> {
-    // TODO(phase-3 M2): SELECT ${COLUMNS} FROM links WHERE code = $1
-    throw new Error("TODO(phase-3 M2): PgLinkRepository.findByCode");
+  async findByCode(code: string) {
+    const { rows } = await this.pool.query<LinkRow>(`SELECT ${COLUMNS} FROM links WHERE code = $1`, [code]);
+    return rows[0] ? toLink(rows[0]) : null;
   }
 
-  async delete(code: string): Promise<boolean> {
-    // TODO(phase-3 M2): DELETE ... and return true if a row was deleted (click_daily cascades).
-    throw new Error("TODO(phase-3 M2): PgLinkRepository.delete");
+  async delete(code: string) {
+    const result = await this.pool.query("DELETE FROM links WHERE code = $1", [code]);
+    return (result.rowCount ?? 0) > 0;
   }
 
-  async recordClick(linkId: number, day: string): Promise<void> {
-    // TODO(phase-3 M3): ONE atomic statement that bumps links.click_count and upserts
-    // click_daily(link_id, day) (hint: a CTE + INSERT ... ON CONFLICT DO UPDATE).
-    throw new Error("TODO(phase-3 M3): PgLinkRepository.recordClick");
+  async recordClick(linkId: number, day: string) {
+    // One statement = one atomic unit: bump the total and upsert the daily bucket.
+    await this.pool.query(
+      `WITH bumped AS (
+         UPDATE links SET click_count = click_count + 1 WHERE id = $1 RETURNING id
+       )
+       INSERT INTO click_daily (link_id, day, clicks)
+       SELECT id, $2::date, 1 FROM bumped
+       ON CONFLICT (link_id, day) DO UPDATE SET clicks = click_daily.clicks + 1`,
+      [linkId, day],
+    );
   }
 
-  async dailyClicks(linkId: number, start: string, end: string): Promise<DailyClicks[]> {
-    // TODO(phase-3 M4): rows of click_daily for linkId with start <= day <= end, ordered by day.
-    throw new Error("TODO(phase-3 M4): PgLinkRepository.dailyClicks");
+  async dailyClicks(linkId: number, start: string, end: string) {
+    const { rows } = await this.pool.query<{ day: string; clicks: number }>(
+      "SELECT day, clicks FROM click_daily WHERE link_id = $1 AND day BETWEEN $2 AND $3 ORDER BY day",
+      [linkId, start, end],
+    );
+    return rows.map((r) => ({ day: r.day, clicks: r.clicks }));
   }
 
   async ping() {

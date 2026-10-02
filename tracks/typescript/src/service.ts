@@ -1,11 +1,14 @@
 // Business logic. Framework-free so it can be unit-tested with in-memory adapters.
 import { generateCode } from "./codes.js";
 import type { LinkCache } from "./cache.js";
-import type { CachedLink, DailyClicks, Link } from "./models.js";
+import { aliasTaken, DuplicateCodeError, expired, notFound } from "./errors.js";
+import { isExpired, isoDay, type CachedLink, type DailyClicks, type Link } from "./models.js";
 import type { LinkRepository } from "./repository.js";
+import { validateAlias, validateDays, validateExpiresInDays, validateUrl } from "./validation.js";
 
 export const MAX_CACHE_TTL_SECONDS = 3600;
 export const MAX_CODE_ATTEMPTS = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export type Clock = () => Date;
 type Logger = { warn: (msg: string) => void; error: (msg: string) => void };
@@ -19,48 +22,95 @@ export class LinkService {
     private readonly log: Logger = console,
   ) {}
 
-  // ---- create (M2) ---------------------------------------------------
+  // ---- create ---------------------------------------------------------
   async create(url: unknown, alias?: unknown, expiresInDays?: unknown): Promise<Link> {
-    // TODO(phase-3 M2): validate the three inputs, compute expiresAt from this.clock(),
-    // insert with the alias (DuplicateCodeError -> aliasTaken) or with a random code, retrying
-    // up to MAX_CODE_ATTEMPTS times on DuplicateCodeError (birthday problem, ADR-0001).
-    throw new Error("TODO(phase-3 M2): LinkService.create");
+    const longUrl = validateUrl(url);
+    const customAlias = validateAlias(alias);
+    const days = validateExpiresInDays(expiresInDays);
+    const now = this.clock();
+    const expiresAt = days ? new Date(now.getTime() + days * DAY_MS) : null;
+
+    if (customAlias) {
+      try {
+        return await this.repo.insert(customAlias, longUrl, true, now, expiresAt);
+      } catch (err) {
+        if (err instanceof DuplicateCodeError) throw aliasTaken(customAlias);
+        throw err;
+      }
+    }
+    // Random codes can collide (birthday problem); the DB unique constraint is the
+    // source of truth, so we retry a few times instead of "check then insert".
+    for (let attempt = 0; attempt < MAX_CODE_ATTEMPTS; attempt++) {
+      try {
+        return await this.repo.insert(this.codeGenerator(), longUrl, false, now, expiresAt);
+      } catch (err) {
+        if (!(err instanceof DuplicateCodeError)) throw err;
+        this.log.warn("short code collision, retrying");
+      }
+    }
+    throw new Error("could not generate a unique short code");
   }
 
-  // ---- read / delete (M2) -----------------------------------------------
+  // ---- read / delete --------------------------------------------------
   async get(code: string): Promise<Link> {
-    // TODO(phase-3 M2): repo.findByCode, throw notFound(code) when missing.
-    throw new Error("TODO(phase-3 M2): LinkService.get");
+    const link = await this.repo.findByCode(code);
+    if (!link) throw notFound(code);
+    return link;
   }
 
   async delete(code: string): Promise<void> {
-    // TODO(phase-3 M2): delete from the repo (404 if missing) AND evict it from the cache.
-    throw new Error("TODO(phase-3 M2): LinkService.delete");
+    if (!(await this.repo.delete(code))) throw notFound(code);
+    await this.cache.delete(code);
   }
 
-  // ---- redirect hot path (M2 + M3) ----------------------------------------
+  // ---- redirect hot path ----------------------------------------------
   async resolve(code: string): Promise<string> {
-    // TODO(phase-3 M2/M3): cache-aside lookup (cache -> repo -> cache.put with cacheTtl), 404 if
-    // unknown, 410 if expired (also evict it), then record a click. A failing recordClick must be
-    // logged with this.log.error and must NOT break the redirect. Return the long URL.
-    throw new Error("TODO(phase-3 M2): LinkService.resolve");
+    const now = this.clock();
+    let cached = await this.cache.get(code);
+    if (!cached) {
+      const link = await this.repo.findByCode(code);
+      if (!link) throw notFound(code);
+      cached = { id: link.id, longUrl: link.longUrl, expiresAt: link.expiresAt };
+      const ttl = LinkService.cacheTtl(cached, now);
+      if (ttl > 0) await this.cache.put(code, cached, ttl);
+    }
+    if (isExpired(cached, now)) {
+      await this.cache.delete(code);
+      throw expired(code);
+    }
+    try {
+      await this.repo.recordClick(cached.id, isoDay(now));
+    } catch (err) {
+      // A lost click must never break a redirect.
+      this.log.error(`failed to record click for ${code}: ${(err as Error).message}`);
+    }
+    return cached.longUrl;
   }
 
   /** A cache entry must never outlive the link's expiry. */
   static cacheTtl(link: CachedLink, now: Date): number {
-    // TODO(phase-3 M3): MAX_CACHE_TTL_SECONDS, but never longer than the seconds left until expiry.
-    throw new Error("TODO(phase-3 M3): LinkService.cacheTtl");
+    if (!link.expiresAt) return MAX_CACHE_TTL_SECONDS;
+    const remaining = Math.floor((link.expiresAt.getTime() - now.getTime()) / 1000);
+    return Math.min(MAX_CACHE_TTL_SECONDS, remaining);
   }
 
-  // ---- analytics (M4) ------------------------------------------------------
+  // ---- analytics ------------------------------------------------------
   async stats(code: string, days?: unknown): Promise<{ link: Link; daily: DailyClicks[] }> {
-    // TODO(phase-3 M4): validateDays, get the link, return { link, daily: await this.dailySeries(link, window) }.
-    throw new Error("TODO(phase-3 M4): LinkService.stats");
+    const window = validateDays(days);
+    const link = await this.get(code);
+    return { link, daily: await this.dailySeries(link, window) };
   }
 
   async dailySeries(link: Link, days: number): Promise<DailyClicks[]> {
-    // TODO(phase-3 M4): one entry per UTC day for the last `days` days (today included), oldest first,
-    // zero-filled (repo.dailyClicks only returns days that had clicks). Hint: isoDay() in models.ts.
-    throw new Error("TODO(phase-3 M4): LinkService.dailySeries");
+    const endMs = Date.parse(isoDay(this.clock()));
+    const startMs = endMs - (days - 1) * DAY_MS;
+    const rows = await this.repo.dailyClicks(link.id, isoDay(new Date(startMs)), isoDay(new Date(endMs)));
+    const byDay = new Map(rows.map((r) => [r.day, r.clicks]));
+    const series: DailyClicks[] = [];
+    for (let ms = startMs; ms <= endMs; ms += DAY_MS) {
+      const day = isoDay(new Date(ms));
+      series.push({ day, clicks: byDay.get(day) ?? 0 });
+    }
+    return series;
   }
 }
