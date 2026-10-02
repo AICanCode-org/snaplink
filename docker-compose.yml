@@ -1,0 +1,47 @@
+# SnapLink local stack (starter): PostgreSQL + Redis for running a track on your machine.
+#   docker compose up -d postgres redis      then   cd tracks/<track> && make run
+# In Phase 6 you add the app itself as a service (one profile per track).
+name: snaplink
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: snaplink
+      POSTGRES_PASSWORD: snaplink   # local development only — never reuse in a deployment
+      POSTGRES_DB: snaplink
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./spec/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snaplink -d snaplink"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Optional local LLM (Phase 3 M5):  docker compose --profile ollama up -d
+  # then: docker compose exec ollama ollama pull llama3.2:1b  and run your track with
+  #       INSIGHTS_PROVIDER=llm LLM_BASE_URL=http://localhost:11434/v1
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  pgdata:
+  ollama:

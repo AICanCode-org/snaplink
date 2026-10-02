@@ -1,0 +1,33 @@
+name: User story
+description: A small, testable slice of user value (Phase 1 creates these)
+title: "US-<n>: <short title>"
+labels: ["user-story"]
+body:
+  - type: textarea
+    id: story
+    attributes:
+      label: Story
+      description: As a <persona>, I want <capability>, so that <benefit>.
+      placeholder: As Priya, I want a custom alias like /techfest, so that people can type it from a poster.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria (Given / When / Then)
+      placeholder: |
+        - Given a free alias, when I POST it, then I get 201 and custom=true
+        - Given a taken alias, when I POST it, then I get 409 alias-taken
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Phase 3 milestone
+      options: ["M1 codes + validation", "M2 create + redirect", "M3 cache + click counting", "M4 stats", "M5 insights (AI)", "Later"]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / out of scope
